@@ -108,7 +108,7 @@ class TranslationSettings(BaseModel):
         description="Maximum number of workers for translation pool. If not set, will use qps as the number of workers",
     )
     no_auto_extract_glossary: bool = Field(
-        default=False,
+        default=True,
         description="Disable auto extract glossary",
     )
     primary_font_family: str | None = Field(
@@ -155,7 +155,7 @@ class PDFSettings(BaseModel):
         default=False, description="Use alternating pages mode for dual PDF"
     )
     watermark_output_mode: str = Field(
-        default="watermarked",
+        default="no_watermark",
         description="Watermark output mode for PDF files (watermarked, no_watermark, or both)",
     )
     max_pages_per_part: int | None = Field(

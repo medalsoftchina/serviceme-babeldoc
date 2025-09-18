@@ -223,185 +223,129 @@ def _translate_wrapper(
 
 
 async def _translate_in_subprocess(
-    settings: SettingsModel,
-    file: Path,
+        settings: SettingsModel,
+        file: Path,
 ):
-    # 30 minutes timeout
+    # 30分钟超时设置（与原逻辑一致）
     cb = asynchronize.AsyncCallback(timeout=30 * 60)
 
-    (pipe_progress_recv, pipe_progress_send) = multiprocessing.Pipe(duplex=False)
-    (pipe_cancel_message_recv, pipe_cancel_message_send) = multiprocessing.Pipe(
-        duplex=False
-    )
-    logger_queue = multiprocessing.Queue()
-    cancel_event = threading.Event()
+    # 1. 替换 multiprocessing.Pipe/Queue：用线程安全队列替代进程间通信
+    progress_queue = queue.Queue()  # 替代 pipe_progress_send/recv：传递进度/错误
+    cancel_event = threading.Event()  # 替代 pipe_cancel_message：控制翻译取消
+    cancel_flag = False
 
+    # 2. 进度接收线程：从队列获取进度，回调到 AsyncCallback（保留原逻辑）
     def recv_thread():
         while True:
             if cancel_event.is_set():
                 break
             try:
-                event = pipe_progress_recv.recv()
-                if event is None:
-                    logger.debug("recv none event")
+                # 用超时队列避免阻塞：1秒超时后重新检查取消信号
+                event = progress_queue.get(timeout=1)
+                if event is None:  # 翻译结束标记
+                    logger.debug("recv none event: translation finished")
                     cb.finished_callback_without_args()
                     break
 
-                # Handle different types of messages from the subprocess
+                # 原逻辑：处理进度/错误事件
                 if isinstance(event, TranslationError):
-                    # Received a structured error object
-                    logger.error(f"Received error from subprocess: {event}")
+                    logger.error(f"Received translation error: {event}")
                     cb.error_callback(event)
                     break
                 elif isinstance(event, dict):
-                    # Process normal progress events
-                    cb.step_callback(event)
+                    cb.step_callback(event)  # 进度回调
                 else:
-                    # Unexpected message type
-                    logger.warning(
-                        f"Unexpected message type from subprocess: {type(event)}"
-                    )
-                    error = IPCError(f"Unexpected message type: {type(event)}")
+                    logger.warning(f"Unexpected event type: {type(event)}")
+                    error = IPCError(f"Unexpected event type: {type(event)}")
                     cb.error_callback(error)
                     break
-            except EOFError:
-                logger.debug("recv eof error")
-                error = IPCError("Connection to subprocess was closed unexpectedly")
-                cb.error_callback(error)
-                break
+            except queue.Empty:
+                continue  # 超时后继续循环，检查取消信号
             except Exception as e:
                 if not cancel_event.is_set():
-                    logger.error(f"Error receiving event: {e}")
-                error = IPCError(f"IPC error: {e}", details=str(e))
+                    logger.error(f"Error in recv thread: {e}")
+                error = IPCError(f"Progress receive error: {e}", details=str(e))
                 cb.error_callback(error)
                 break
 
-    def log_thread():
-        while True:
-            try:
-                record = logger_queue.get()
-                if record is None:
-                    logger.info("Listener stopped.")
-                    break
-                logger.handle(record)
-            except KeyboardInterrupt:
-                logger.info("Listener stopped.")
-                break
-            except queue.Empty:
-                logger.info("Listener stopped.")
-                break
-            except Exception:
-                logger.error("Failure in listener_process")
-                break
+    # 3. 翻译执行线程：直接调用 _translate_wrapper（替代原 multiprocessing.Process）
+    # 注意：_translate_wrapper 需改为线程安全（若有全局变量/资源，需加锁）
+    def translate_thread():
+        try:
+            # 直接调用翻译逻辑：将原“子进程执行”改为“线程内直接调用”
+            # 原 args 中的 pipe_progress_send 替换为 progress_queue（发送进度）
+            # 原 pipe_cancel_message_recv 替换为 cancel_event（监听取消信号）
+            _translate_wrapper(
+                settings=settings,
+                file=file,
+                progress_queue=progress_queue,  # 传递进度队列
+                cancel_event=cancel_event,  # 传递取消信号
+                logger=logger  # 直接传递日志对象，替代 logger_queue
+            )
+        except TranslationError as e:
+            # 翻译错误：发送到进度队列，由 recv_thread 回调
+            progress_queue.put(e)
+        except Exception as e:
+            # 其他异常：包装为 IPCError 并回调
+            logger.error(f"Translation thread failed: {e}")
+            progress_queue.put(IPCError(f"Translation failed: {e}", details=str(e)))
+        finally:
+            # 翻译结束：发送 None 标记，触发 recv_thread 退出
+            progress_queue.put(None)
 
-    recv_t = threading.Thread(target=recv_thread)
+    # 4. 启动辅助线程（进度接收 + 翻译执行）
+    recv_t = threading.Thread(target=recv_thread, daemon=True)  # 守护线程：随主进程退出
+    translate_t = threading.Thread(target=translate_thread, daemon=True)
     recv_t.start()
-    log_t = threading.Thread(target=log_thread)
-    log_t.start()
+    translate_t.start()
 
-    translate_process = multiprocessing.Process(
-        target=_translate_wrapper,
-        args=(
-            settings,
-            file,
-            pipe_progress_send,
-            pipe_cancel_message_recv,
-            logger_queue,
-        ),
-    )
-    translate_process.start()
-    cancel_flag = False
     try:
+        # 5. 原逻辑：异步yield进度事件（与Celery任务回调兼容）
         async for event in cb:
-            # Check for errors before yielding events
             if cb.has_error():
-                # Let AsyncCallback.__anext__ raise the error
-                # This will break out of the loop
-                break
+                break  # 有错误时退出循环，由 AsyncCallback 抛出异常
             yield event.args[0]
     except asyncio.CancelledError:
+        # Celery 任务被取消时，触发翻译线程停止
         cancel_flag = True
-        logger.info("Process Translation cancelled")
+        cancel_event.set()
+        logger.info("Translation cancelled by Celery")
         raise
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received in main process")
+        cancel_flag = True
+        cancel_event.set()
+        logger.info("KeyboardInterrupt received")
     finally:
-        logger.debug("send cancel message")
-        try:
-            pipe_cancel_message_send.send(True)
-        except (OSError, BrokenPipeError) as e:
-            logger.debug(f"Failed to send cancel message: {e}")
-        logger.debug("close pipe cancel message")
-        try:
-            pipe_cancel_message_send.close()
-        except Exception as e:
-            logger.debug(f"Failed to close pipe_cancel_message_send: {e}")
+        # 6. 资源清理：确保线程退出 + 队列关闭（适配Celery任务回收）
+        logger.debug("Cleaning up translation resources")
 
-        try:
-            pipe_progress_send.send(None)
-        except (OSError, BrokenPipeError) as e:
-            logger.debug(f"Failed to send None to pipe_progress_send: {e}")
-
-        logger.debug("set cancel event")
+        # 触发翻译线程取消
         cancel_event.set()
 
-        # 关闭接收端管道以中断 recv_thread 中的阻塞接收
-        try:
-            pipe_progress_recv.close()
-            logger.debug("closed pipe_progress_recv")
-        except Exception as e:
-            logger.debug(f"Failed to close pipe_progress_recv: {e}")
+        # 等待翻译线程退出（超时2秒，防止卡住）
+        translate_t.join(timeout=2)
+        if translate_t.is_alive():
+            logger.warning("Translation thread did not exit in time")
 
-        # 终止子进程，使用超时防止卡住
-        translate_process.join(timeout=2)
-        logger.debug("join translate process")
-        if translate_process.is_alive():
-            logger.info("Translate process did not finish in time, terminate it")
-            translate_process.terminate()
-            translate_process.join(timeout=1)
-        if translate_process.is_alive():
-            logger.info("Translate process did not finish in time, killing it")
-            try:
-                translate_process.kill()
-                translate_process.join(timeout=1)
-                logger.info("Translate process killed")
-            except Exception as e:
-                logger.exception(f"Error killing translate process: {e}")
-
-        # 等待接收线程，使用超时防止卡住
-        logger.debug("join recv thread")
+        # 等待进度接收线程退出（超时2秒）
         recv_t.join(timeout=2)
         if recv_t.is_alive():
-            logger.warning("Recv thread did not finish in time")
+            logger.warning("Progress receive thread did not exit in time")
 
-        # 等待日志线程，使用超时防止卡住
-        log_t.join(timeout=1)
-        if log_t.is_alive():
-            logger.warning("Log thread did not finish in time")
-
-        # 尝试关闭日志队列
-        try:
-            logger_queue.put(None)
-            logger_queue.close()
-        except Exception as e:
-            logger.debug(f"Failed to close logger_queue: {e}")
-
-        logger.debug("translate process exit code: %s", translate_process.exitcode)
+        # 7. 原逻辑：检查翻译是否异常退出（无错误捕获时主动抛出）
         if not cancel_flag:
-            # Check if the process crashed but no error was captured through IPC
-            if translate_process.exitcode not in (0, None) and not cb.has_error():
+            # 检查翻译线程是否崩溃且无错误回调
+            if not translate_t.is_alive() and not cb.has_error():
                 error = SubprocessCrashError(
-                    f"Translation subprocess crashed with exit code {translate_process.exitcode}",
-                    exit_code=translate_process.exitcode,
+                    "Translation finished but no result/error captured",
+                    exit_code=0  # 单进程无退出码，用0标记正常结束
                 )
-                # We need to raise the error as we're outside the async for loop now
                 raise error
+            # 若有未抛出的错误，主动抛出
             elif cb.has_error():
-                # If we have a stored error but haven't raised it yet (exited the loop normally)
-                # re-raise it now
-                # Note: In most cases, this won't execute because the error would already have been
-                # raised by AsyncCallback.__anext__
                 raise cb.error
+
+        logger.debug("Translation cleanup completed")
 
 
 def _get_glossaries(settings: SettingsModel) -> list[Glossary] | None:
@@ -563,7 +507,7 @@ async def do_translate_file_async(
         pages=None,
         output_dir=None,
         doc_layout_model=1,
-        use_rich_pbar=True,
+        use_rich_pbar=False,
     )
     progress_context, progress_handler = create_progress_handler(rich_pbar_config)
     input_files = settings.basic.input_files

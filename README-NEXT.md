@@ -1,10 +1,11 @@
 ## 项目简介
 
-本项目基于开源项目 [PDFMathTranslate-next](https://github.com/PDFMathTranslate/PDFMathTranslate-next) 实现，并以 Celery 形式进行服务部署，旨在为用户提供高效的 PDF 翻译能力。
+本项目基于开源项目 [PDFMathTranslate-next](https://github.com/PDFMathTranslate/PDFMathTranslate-next) 和 [BabelDOC](https://github.com/funstory-ai/BabelDOC) 实现，并以 Celery 形式进行服务部署，旨在为用户提供高效的 PDF 翻译能力。
 
 ## 开源声明
 
-本项目在产品中需显著声明其基于 PDFMathTranslate-next 开源项目，并遵循相应的开源协议进行开发和使用。同时，本项目也将允许开源。
+本项目在产品中需显著声明其基于 PDFMathTranslate-next和 BabelDOC 开源项目，并遵循相应的开源协议进行开发和使用。同时，本项目也将允许开源。
+本项目除celery部署外没有特别修改，有需要的也可直接到GitHub上看原始仓库代码。
 
 ## 主要特性
 
