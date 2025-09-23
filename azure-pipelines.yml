@@ -1,0 +1,88 @@
+trigger:
+- none
+
+resources:
+- repo: self
+
+variables:
+  - ${{ if or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/stage')) }}:
+      - group: Development
+  - ${{ else }}:
+      - group: Development
+  - name: branchName
+    value: $[replace(replace(variables['Build.SourceBranch'], 'refs/heads/', ''), '/', '-')]
+  - name: imageName
+    value: 'serviceme-babeldoc'
+
+
+parameters:
+  - name: tag
+    displayName: 'Docker Image Tag'
+    type: string
+    default: '$(branchName)-$(Build.BuildId)'
+    values: []
+  - name: push_to_china
+    displayName: 'push image to china registry'
+    type: string
+    default: '0'
+    values: []
+
+pool:
+  name: 'Azure Pipelines'
+  vmImage: ubuntu-latest
+
+
+stages:
+- stage: Build
+  displayName: Build and push stage
+  jobs:
+  - job: Build_babeldoc_Image
+    displayName: Build babeldoc Image job
+    steps:
+    - script: |
+        echo $(RegistryServerGlobal)/$(imageName):${{ parameters.tag }}
+      displayName: Print Tag
+
+    - task: Docker@2
+      inputs:
+        containerRegistry: '$(ContainerRegistryGlobal)'
+        command: 'login'
+      displayName: 'Login to Global Container Registry'
+
+    - task: Docker@2
+      displayName: Docker Build babeldoc
+      inputs:
+        command: build
+        containerRegistry: '$(ContainerRegistryGlobal)'
+        repository: '$(imageName)'
+        dockerfile: Dockerfile
+        tags: |
+          $(branchName)-latest
+          ${{ parameters.tag }}
+
+    - task: Docker@2
+      displayName: Push babeldoc Image to Global
+      inputs:
+        command: push
+        containerRegistry: '$(ContainerRegistryGlobal)'
+        repository: '$(imageName)'
+        tags: |
+          $(branchName)-latest
+          ${{ parameters.tag }}
+
+    - task: Docker@2
+      condition: eq(${{ parameters.push_to_china }}, '1')
+      inputs:
+        containerRegistry: '$(ContainerRegistryChina)'
+        command: 'login'
+      displayName: 'Login to China Container Registry'
+
+    - script: |
+        docker tag $(RegistryServerGlobal)/$(imageName):$(branchName)-latest $(RegistryServerChina)/$(imageName):$(branchName)-latest
+        docker tag $(RegistryServerGlobal)/$(imageName):${{ parameters.tag }} $(RegistryServerChina)/$(imageName):${{ parameters.tag }}
+        docker push $(RegistryServerChina)/$(imageName):$(branchName)-latest
+        docker push $(RegistryServerChina)/$(imageName):${{ parameters.tag }}
+        echo $(RegistryServerChina)/$(imageName):$(branchName)-latest
+        echo $(RegistryServerChina)/$(imageName):${{ parameters.tag }}
+      condition: eq(${{ parameters.push_to_china }}, '1')
+      displayName: 'push babeldoc image to China Container Registry'
