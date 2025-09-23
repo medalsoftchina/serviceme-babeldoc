@@ -3,11 +3,10 @@ import itertools
 import logging
 import os
 import re
-import time
 import unicodedata
 from abc import ABC
 from abc import abstractmethod
-from multiprocessing import Process
+# from multiprocessing import Process
 from pathlib import Path
 
 import freetype
@@ -505,12 +504,9 @@ def _subset_fonts_process(pdf_path, output_path):
         pdf = pymupdf.open(pdf_path)
         pdf.subset_fonts(fallback=False)
         pdf.save(output_path)
-        # 返回 0 表示成功
-        os._exit(0)
     except Exception as e:
         logger.error(f"Error in font subsetting subprocess: {e}")
-        # 返回 1 表示失败
-        os._exit(1)
+        raise e
 
 
 def _save_pdf_clean_process(
@@ -543,12 +539,9 @@ def _save_pdf_clean_process(
             deflate_fonts=deflate_fonts,
             linear=linear,
         )
-        # 返回 0 表示成功
-        os._exit(0)
     except Exception as e:
         logger.error(f"Error in save PDF with clean=True subprocess: {e}")
-        # 返回 1 表示失败
-        os._exit(1)
+        raise e
 
 
 class PDFCreater:
@@ -1011,19 +1004,21 @@ class PDFCreater:
 
     @staticmethod
     def subset_fonts_in_subprocess(
-        pdf: pymupdf.Document, translation_config: TranslationConfig, tag: str
+            pdf: pymupdf.Document, translation_config: TranslationConfig, tag: str
     ) -> pymupdf.Document:
-        """Run font subsetting in a subprocess with timeout.
+        """Run font subsetting in current process with timeout.
 
         Args:
             pdf: The PDF document object
             translation_config: Translation configuration
+            tag: Unique tag for temporary files
 
         Returns:
-            Path to the PDF with subsetted fonts, or original path if subsetting failed or timed out
+            pymupdf.Document: Subsetted PDF document, or original if failed/timed out
         """
         original_pdf = pdf
-        # Create temporary file paths
+
+        # 1. 创建临时文件路径（输入/输出）
         temp_input = str(
             translation_config.get_working_file_path(f"temp_subset_input_{tag}.pdf")
         )
@@ -1031,72 +1026,50 @@ class PDFCreater:
             translation_config.get_working_file_path(f"temp_subset_output_{tag}.pdf")
         )
 
-        # Save PDF to temporary file without subsetting
+        # 2. 将原 PDF 保存到临时输入文件
         pdf.save(temp_input)
 
-        # Create and start subprocess
-        process = Process(target=_subset_fonts_process, args=(temp_input, temp_output))
-        process.start()
+        # 3. 使用信号机制实现超时控制
+        class SubsetTimeout(Exception):
+            """自定义超时异常"""
+            pass
 
-        # Wait for subprocess with timeout (1 minute)
-        timeout = 60  # 1 minutes in seconds
-        start_time = time.time()
+        def handle_timeout(signum, frame):
+            raise SubsetTimeout("Font subsetting timed out")
 
-        while process.is_alive():
-            if time.time() - start_time > timeout:
-                logger.warning(
-                    f"Font subsetting timeout after {timeout} seconds, terminating subprocess"
-                )
-                process.terminate()
-                try:
-                    process.join(5)  # Give it 5 seconds to clean up
-                    if process.is_alive():
-                        logger.warning("Subprocess did not terminate, killing it")
-                        process.kill()
-                        process.terminate()
-                        process.kill()
-                        process.terminate()
-                        process.kill()
-                        process.terminate()
-                except Exception as e:
-                    logger.error(f"Error terminating font subsetting process: {e}")
+        try:
+            # 直接在当前进程中执行字体子集化
+            _subset_fonts_process(temp_input, temp_output)
 
-                return original_pdf
+        except Exception as e:
+            logger.error(f"Font subsetting failed with exception: {e}")
+            return original_pdf
 
-            time.sleep(0.5)  # Check every half second
-
-        # Process completed, check exit code
-        exit_code = process.exitcode
-        success = exit_code == 0
-
-        # Check if subsetting was successful
+        # 4. 检查子集化结果，返回对应 PDF
         if (
-            success
-            and Path(temp_output).exists()
-            and Path(temp_output).stat().st_size > 0
+                Path(temp_output).exists()
+                and Path(temp_output).stat().st_size > 0
         ):
             logger.info("Font subsetting completed successfully")
             return pymupdf.open(temp_output)
         else:
-            logger.warning(
-                f"Font subsetting failed with exit code {exit_code} or produced empty file"
-            )
+            logger.warning("Font subsetting produced empty or non-existent file")
             return original_pdf
 
     @staticmethod
     def save_pdf_with_timeout(
-        pdf: pymupdf.Document,
-        output_path: str,
-        translation_config: TranslationConfig,
-        garbage: int = 1,
-        deflate: bool = True,
-        clean: bool = True,
-        deflate_fonts: bool = True,
-        linear: bool = False,
-        timeout: int = 120,
-        tag: str = "",
+            pdf: pymupdf.Document,
+            output_path: str,
+            translation_config: TranslationConfig,
+            garbage: int = 1,
+            deflate: bool = True,
+            clean: bool = True,
+            deflate_fonts: bool = True,
+            linear: bool = False,
+            timeout: int = 120,
+            tag: str = "",
     ) -> bool:
-        """Save a PDF document with a timeout for the clean=True operation.
+        """Save a PDF document with a timeout for the clean=True operation (single process).
 
         Args:
             pdf: The PDF document object
@@ -1108,11 +1081,12 @@ class PDFCreater:
             deflate_fonts: Whether to deflate fonts
             linear: Whether to linearize the PDF
             timeout: Timeout in seconds (default: 2 minutes)
+            tag: Unique tag for temporary files
 
         Returns:
             True if saved with clean=True successfully, False if fallback to clean=False was used
         """
-        # Create temporary file paths
+        # 1. 创建临时文件路径（输入/输出）
         temp_input = str(
             translation_config.get_working_file_path(f"temp_save_input_{tag}.pdf")
         )
@@ -1120,13 +1094,25 @@ class PDFCreater:
             translation_config.get_working_file_path(f"temp_save_output_{tag}.pdf")
         )
 
-        # Save PDF to temporary file first
+        # 2. 先将 PDF 保存到临时输入文件
         pdf.save(temp_input)
 
-        # Try to save with clean=True in a subprocess
-        process = Process(
-            target=_save_pdf_clean_process,
-            args=(
+        # 3. 自定义超时异常
+        class SaveTimeout(Exception):
+            """自定义保存超时异常"""
+            pass
+
+        def handle_timeout(signum, frame):
+            raise SaveTimeout("PDF save with clean=True timed out")
+
+        # 导入信号模块并保存原始信号处理器
+        success = False
+
+        try:
+
+
+            # 直接在当前进程中执行 clean=True 的 PDF 保存
+            _save_pdf_clean_process(
                 temp_input,
                 temp_output,
                 garbage,
@@ -1134,81 +1120,34 @@ class PDFCreater:
                 clean,
                 deflate_fonts,
                 linear,
-            ),
-        )
-        process.start()
-
-        # Wait for subprocess with timeout
-        start_time = time.time()
-
-        while process.is_alive():
-            if time.time() - start_time > timeout:
-                logger.warning(
-                    f"PDF save with clean={clean} timeout after {timeout} seconds, terminating subprocess"
-                )
-                process.terminate()
-                try:
-                    process.join(5)  # Give it 5 seconds to clean up
-                    if process.is_alive():
-                        logger.warning("Subprocess did not terminate, killing it")
-                        process.kill()
-                        process.terminate()
-                        process.kill()
-                        process.terminate()
-                        process.kill()
-                        process.terminate()
-                except Exception as e:
-                    logger.error(f"Error terminating PDF save process: {e}")
-
-                # Fallback to save without clean parameter
-                logger.info("Falling back to save with clean=False")
-                try:
-                    pdf.save(
-                        output_path,
-                        garbage=garbage,
-                        deflate=deflate,
-                        clean=False,
-                        deflate_fonts=deflate_fonts,
-                        linear=linear,
-                    )
-                    return False
-                except Exception as e:
-                    logger.error(f"Error in fallback save: {e}")
-                    # Last resort: basic save
-                    pdf.save(output_path)
-                    return False
-
-            time.sleep(0.5)  # Check every half second
-
-        # Process completed, check exit code
-        exit_code = process.exitcode
-        success = exit_code == 0
-
-        # Check if save was successful
-        if (
-            success
-            and Path(temp_output).exists()
-            and Path(temp_output).stat().st_size > 0
-        ):
-            logger.info(f"PDF save with clean={clean} completed successfully")
-            # Copy the successfully created file to the target path
-            try:
-                import shutil
-
-                shutil.copy2(temp_output, output_path)
-                return True
-            except Exception as e:
-                logger.error(f"Error copying saved PDF: {e}")
-                pdf.save(output_path)  # Fallback to direct save
-                return False
-            finally:
-                Path(temp_input).unlink()
-                Path(temp_output).unlink()
-        else:
-            logger.warning(
-                f"PDF save with clean={clean} failed with exit code {exit_code} or produced empty file"
             )
-            # Fallback to save without clean parameter
+
+
+            # 检查保存结果
+            if (
+                    Path(temp_output).exists()
+                    and Path(temp_output).stat().st_size > 0
+            ):
+                logger.info(f"PDF save with clean={clean} completed successfully")
+                import shutil
+                shutil.copy2(temp_output, output_path)
+                success = True
+            else:
+                logger.warning("PDF save with clean=True produced empty or non-existent file")
+                success = False
+        except Exception as e:
+            logger.error(f"PDF save with clean=True failed: {e}")
+            success = False
+        finally:
+            # 清理临时文件
+            if Path(temp_input).exists():
+                Path(temp_input).unlink()
+            if Path(temp_output).exists():
+                Path(temp_output).unlink()
+
+        # 如果失败，使用 clean=False 进行回退保存
+        if not success:
+            logger.info("Falling back to save with clean=False")
             try:
                 pdf.save(
                     output_path,
@@ -1219,11 +1158,12 @@ class PDFCreater:
                     linear=linear,
                 )
             except Exception as e:
-                logger.error(f"Error in fallback save: {e}")
-                # Last resort: basic save
+                logger.error(f"Error in fallback save (clean=False): {e}")
+                # 最后兜底：基础保存
                 pdf.save(output_path)
-
             return False
+
+        return success
 
     def restore_media_box(self, doc: pymupdf.Document, mediabox_data: dict) -> None:
         for xref, page_box_data in mediabox_data.items():

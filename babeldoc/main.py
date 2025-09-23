@@ -728,7 +728,7 @@ def create_progress_handler(translation_config: TranslationConfig):
 
         return progress, progress_handler
     else:
-        pbar = tqdm.tqdm(total=100, desc="translate", mininterval=5)
+        pbar = tqdm.tqdm(total=100, desc="translate", mininterval=5,disable=True)
 
         def progress_handler(event):
             if event["type"] == "progress_update":

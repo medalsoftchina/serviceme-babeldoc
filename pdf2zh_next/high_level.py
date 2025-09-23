@@ -1,15 +1,11 @@
 import asyncio
 import logging
 import logging.handlers
-import multiprocessing
-import multiprocessing.connection
-import multiprocessing.queues
 import queue
 import threading
 import traceback
 from collections.abc import AsyncGenerator
 from functools import partial
-from logging.handlers import QueueHandler
 from pathlib import Path
 
 from babeldoc.format.pdf.high_level import async_translate as babeldoc_translate
@@ -110,13 +106,21 @@ logger = logging.getLogger(__name__)
 def _translate_wrapper(
     settings: SettingsModel,
     file: Path,
-    pipe_progress_send: multiprocessing.connection.Connection,
-    pipe_cancel_message_recv: multiprocessing.connection.Connection,
-    logger_queue: multiprocessing.Queue,
+    progress_queue: queue.Queue,  # 替代原 pipe_progress_send：线程安全队列传递进度/错误
+    cancel_event: threading.Event,  # 替代原 pipe_cancel_message_recv：线程间取消信号
+    logger: logging.Logger,  # 替代原 logger_queue：直接传递日志对象
 ):
-    logger = logging.getLogger(__name__)
-    cancel_event = threading.Event()
+    """
+    同步修改后的翻译执行函数：适配单进程+线程逻辑
+    参数说明：
+    - progress_queue: 线程安全队列，用于向主逻辑发送进度/错误/结束信号
+    - cancel_event: 线程间取消信号，由主逻辑控制，触发翻译取消
+    - logger: 直接使用的日志对象，无需通过队列传递
+    """
+    queue_handler = None  # 原日志队列的 Handler，修改后需清理
     try:
+        # 1. 日志配置：移除 multiprocessing.Queue，直接用传入的 logger
+        # 保留原日志级别控制（屏蔽无关模块的 debug 日志）
         logging.getLogger("asyncio").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
@@ -124,102 +128,109 @@ def _translate_wrapper(
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("peewee").setLevel(logging.WARNING)
 
-        queue_handler = QueueHandler(logger_queue)
-        logging.basicConfig(level=logging.INFO, handlers=[queue_handler])
+        # （可选）若原逻辑依赖 QueueHandler，替换为直接输出（或保留 RichHandler）
+        # 注：若主逻辑已配置日志 Handler，此处可省略
+        queue_handler = logging.StreamHandler()  # 直接输出到控制台（替代原 QueueHandler）
+        logger.addHandler(queue_handler)
+        logger.setLevel(logging.INFO)
 
+        # 2. 创建翻译配置（原逻辑不变）
         config = create_babeldoc_config(settings, file)
 
-        def cancel_recv_thread():
-            try:
-                pipe_cancel_message_recv.recv()
-                logger.debug("Cancel signal received in subprocess")
-                cancel_event.set()
-                config.cancel_translation()
-            except Exception as e:
-                logger.error(f"Error in cancel_recv_thread: {e}")
+        # 3. 取消信号处理：移除原“管道接收线程”，直接监听 cancel_event（线程安全）
+        # 原 cancel_recv_thread 逻辑简化：无需单独线程，翻译过程中实时检查 cancel_event
+        def check_cancel():
+            if cancel_event.is_set():
+                logger.debug("Cancel signal received in translation thread")
+                config.cancel_translation()  # 触发翻译内部取消
+                return True
+            return False
 
-        cancel_t = threading.Thread(target=cancel_recv_thread, daemon=True)
-        cancel_t.start()
-
+        # 4. 异步翻译逻辑（原逻辑不变，但新增“取消检查”）
         async def translate_wrapper_async():
             try:
                 async for event in babeldoc_translate(config):
-                    logger.debug(f"sub process generate event: {event}")
+                    # 实时检查取消信号：若触发取消，立即退出循环
+                    if check_cancel():
+                        logger.debug("Translation cancelled, exiting event loop")
+                        break
+
+                    logger.debug(f"Translation thread generate event: {event}")
+                    # 错误处理：原逻辑不变，改为向 progress_queue 发送
                     if event["type"] == "error":
-                        # Convert babeldoc error to structured exception
                         error_msg = str(event.get("error", "Unknown babeldoc error"))
                         error = BabeldocError(
                             message=f"Babeldoc translation error: {error_msg}",
                             original_error=error_msg,
                         )
-                        pipe_progress_send.send(error)
+                        progress_queue.put(error)
                         break
-                    # Send normal progress events as before
-                    pipe_progress_send.send(event)
+                    # 正常进度：发送到队列，由主逻辑的 recv_thread 处理
+                    progress_queue.put(event)
+                    # 翻译结束：收到 finish 事件后退出
                     if event["type"] == "finish":
+                        logger.debug("Translation finished normally")
                         break
             except Exception as e:
-                # Capture non-babeldoc errors during translation
+                # 捕获翻译过程中的非预期错误
                 tb_str = traceback.format_exc()
-                if not cancel_event.is_set():
+                if not cancel_event.is_set():  # 取消状态下不重复输出错误
                     logger.error(f"Error in translate_wrapper_async: {e}\n{tb_str}")
                 error = SubprocessError(
                     message=f"Error during translation process: {e}",
                     traceback_str=tb_str,
                 )
-                try:
-                    pipe_progress_send.send(error)
-                except Exception as pipe_err:
-                    if not cancel_event.is_set():
-                        logger.error(f"Failed to send error through pipe: {pipe_err}")
+                progress_queue.put(error)  # 错误发送到队列
 
-        # Run the async translation in the subprocess's event loop
+        # 5. 运行异步翻译（原逻辑不变，新增取消检查）
         try:
-            asyncio.run(translate_wrapper_async())
+            # 启动异步翻译前先检查一次取消（避免任务已取消仍执行）
+            if not check_cancel():
+                asyncio.run(translate_wrapper_async())
         except Exception as e:
-            # Capture errors that might occur outside the async context
+            # 捕获 asyncio.run 层面的错误（如事件循环异常）
             tb_str = traceback.format_exc()
             if not cancel_event.is_set():
                 logger.error(f"Error running async translation: {e}\n{tb_str}")
             error = SubprocessError(
-                message=f"Failed to run translation process: {e}", traceback_str=tb_str
+                message=f"Failed to run translation process: {e}",
+                traceback_str=tb_str
             )
-            try:
-                pipe_progress_send.send(error)
-            except Exception as pipe_err:
-                if not cancel_event.is_set():
-                    logger.error(f"Failed to send error through pipe: {pipe_err}")
-    except Exception as e:
-        # Capture any errors during setup or initialization
-        tb_str = traceback.format_exc()
-        logger.error(f"Subprocess initialization error: {e}\n{tb_str}")
-        try:
-            error = SubprocessError(
-                message=f"Translation subprocess initialization error: {e}",
-                traceback_str=tb_str,
-            )
-            pipe_progress_send.send(error)
-        except Exception as pipe_err:
-            if not cancel_event.is_set():
-                logger.error(f"Failed to send error through pipe: {pipe_err}")
-    finally:
-        logger.debug("sub process send close")
-        try:
-            pipe_progress_send.send(None)
-            pipe_progress_send.close()
-            logger.debug("sub process close pipe progress send")
-        except Exception as e:
-            if not cancel_event.is_set():
-                logger.error(f"Error closing progress pipe: {e}")
+            progress_queue.put(error)
 
+    except Exception as e:
+        # 捕获初始化阶段的错误（如配置创建失败）
+        tb_str = traceback.format_exc()
+        logger.error(f"Translation thread initialization error: {e}\n{tb_str}")
+        error = SubprocessError(
+            message=f"Translation thread initialization error: {e}",
+            traceback_str=tb_str,
+        )
+        progress_queue.put(error)
+
+    finally:
+        # 6. 资源清理：确保队列和日志 Handler 正确关闭（适配单进程逻辑）
+        logger.debug("Translation thread cleaning up resources")
+
+        # 发送“结束标记”：告知主逻辑的 recv_thread 翻译已结束
         try:
-            logging.getLogger().removeHandler(queue_handler)
-            logging.getLogger().addHandler(RichHandler())
-            logger_queue.put(None)
-            logger_queue.close()
+            progress_queue.put(None)
+            logger.debug("Sent finish marker to progress queue")
         except Exception as e:
             if not cancel_event.is_set():
-                logger.error(f"Error closing logger queue: {e}")
+                logger.error(f"Error sending finish marker: {e}")
+
+        # 清理日志 Handler（避免内存泄漏）
+        if queue_handler and logger:
+            try:
+                logger.removeHandler(queue_handler)
+                logger.addHandler(RichHandler())  # 恢复原日志 Handler（若需）
+                logger.debug("Cleaned up logger handler")
+            except Exception as e:
+                if not cancel_event.is_set():
+                    logger.error(f"Error cleaning up logger handler: {e}")
+
+        logger.debug("Translation thread cleanup completed")
 
 
 async def _translate_in_subprocess(
@@ -299,12 +310,14 @@ async def _translate_in_subprocess(
     recv_t.start()
     translate_t.start()
 
+    has_result = False
     try:
         # 5. 原逻辑：异步yield进度事件（与Celery任务回调兼容）
         async for event in cb:
             if cb.has_error():
                 break  # 有错误时退出循环，由 AsyncCallback 抛出异常
             yield event.args[0]
+            has_result = True
     except asyncio.CancelledError:
         # Celery 任务被取消时，触发翻译线程停止
         cancel_flag = True
@@ -335,7 +348,7 @@ async def _translate_in_subprocess(
         # 7. 原逻辑：检查翻译是否异常退出（无错误捕获时主动抛出）
         if not cancel_flag:
             # 检查翻译线程是否崩溃且无错误回调
-            if not translate_t.is_alive() and not cb.has_error():
+            if not translate_t.is_alive() and not cb.has_error() and not has_result:
                 error = SubprocessCrashError(
                     "Translation finished but no result/error captured",
                     exit_code=0  # 单进程无退出码，用0标记正常结束
@@ -515,6 +528,7 @@ async def do_translate_file_async(
     settings.basic.input_files = set()
 
     error_count = 0
+    mono_path = None
 
     for file in input_files:
         logger.info(f"translate file: {file}")
@@ -532,6 +546,7 @@ async def do_translate_file_async(
                         logger.info(f"  Time Cost: {result.total_seconds:.2f}s")
                         logger.info(f"  Mono PDF: {result.mono_pdf_path or 'None'}")
                         logger.info(f"  Dual PDF: {result.dual_pdf_path or 'None'}")
+                        mono_path = result.mono_pdf_path
                         break
                     if event["type"] == "error":
                         error_msg = event.get("error", "Unknown error")
@@ -558,7 +573,7 @@ async def do_translate_file_async(
                 if not ignore_error:
                     raise
 
-    return error_count
+    return mono_path
 
 
 def do_translate_file(settings: SettingsModel, ignore_error: bool = False) -> int:

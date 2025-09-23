@@ -1,32 +1,30 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+FROM python:3.11
 
 WORKDIR /app
 
+# 安装系统依赖（根据需要取消注释）
+# RUN apt-get update && \
+#     apt-get install --no-install-recommends -y libgl1 libglib2.0-0 libxext6 libsm6 libxrender1 build-essential && \
+#     rm -rf /var/lib/apt/lists/*
 
-EXPOSE 7860
-
-ENV PYTHONUNBUFFERED=1
-
-# # Download all required fonts
-# ADD "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoKurrent-Regular.ttf" /app/
-# ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifCN-Regular.ttf" /app/
-# ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifTW-Regular.ttf" /app/
-# ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifJP-Regular.ttf" /app/
-# ADD "https://github.com/timelic/source-han-serif/releases/download/main/SourceHanSerifKR-Regular.ttf" /app/
-
-RUN apt-get update && \
-     apt-get install --no-install-recommends -y libgl1 libglib2.0-0 libxext6 libsm6 libxrender1 build-essential && \
-     rm -rf /var/lib/apt/lists/*
-
+# 复制依赖文件
 COPY pyproject.toml .
-RUN uv pip install --system --no-cache -r pyproject.toml && babeldoc --version && babeldoc --warmup
 
-COPY . .
+# 安装uv并使用国内源加速
+RUN pip install uv -i https://mirrors.aliyun.com/pypi/simple/
 
-# Calls for a random number to break the cahing of babeldoc upgrade
-# (https://stackoverflow.com/questions/35134713/disable-cache-for-specific-run-commands/58801213#58801213)
-ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
+# 创建虚拟环境并安装依赖到虚拟环境中
+RUN uv venv /app/.venv && \
+    uv pip install --no-cache -r pyproject.toml -i https://mirrors.aliyun.com/pypi/simple/
 
-RUN uv pip install --system --no-cache . && uv pip install --system --no-cache --compile-bytecode -U babeldoc "pymupdf<1.25.3" && babeldoc --version && babeldoc --warmup
-RUN pdf2zh --version
-CMD ["pdf2zh", "--gui"]
+# 复制项目文件
+COPY . /app
+
+# 确保entrypoint.sh中使用虚拟环境的Python
+RUN chmod +x /app/entrypoint.sh
+
+EXPOSE 80
+ENV PYTHONPATH=/app
+
+# 运行入口脚本（脚本中应使用虚拟环境的Python）
+CMD ["/app/entrypoint.sh"]
