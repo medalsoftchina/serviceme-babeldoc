@@ -3,9 +3,9 @@ FROM python:3.11
 WORKDIR /app
 
 # 安装系统依赖（根据需要取消注释）
-# RUN apt-get update && \
-#     apt-get install --no-install-recommends -y libgl1 libglib2.0-0 libxext6 libsm6 libxrender1 build-essential && \
-#     rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+     apt-get install --no-install-recommends -y libgl1 libglib2.0-0 libxext6 libsm6 libxrender1 build-essential && \
+     rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
 COPY pyproject.toml .
