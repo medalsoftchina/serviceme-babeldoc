@@ -19,8 +19,10 @@ import os
 from pathlib import Path
 from loguru import logger
 
+from app.common.engine.pg_session import get_db_session
 from app.common.log import register_logger
-
+from app.model.attachment_storage.attachment_storage import AttachmentStorage
+from datetime import datetime
 
 class QueueName(Enum):
     # 默认
@@ -91,6 +93,17 @@ app.autodiscover_tasks(
 def worker_init(**kwargs):
     try:
         # todo 更新文件状态
+        with get_db_session() as session:
+            files = (
+                AttachmentStorage.query(session)
+                    .filter(AttachmentStorage.status.in_([4, 5]))
+                    .all()
+            )
+            for file in files:
+                file.error_message = "system restart"
+                file.updated_at = datetime.utcnow()
+                file.status = 6
+            session.commit()
         logger.info("celery worker [Startup Hook] init complete")
     except Exception as e:
         logger.error(f"celery worker startup connect redis error: {e}")
