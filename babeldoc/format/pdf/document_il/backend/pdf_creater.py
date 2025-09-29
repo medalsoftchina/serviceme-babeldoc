@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import unicodedata
+import uuid
 from abc import ABC
 from abc import abstractmethod
 # from multiprocessing import Process
@@ -1186,8 +1187,9 @@ class PDFCreater:
                 != WatermarkOutputMode.Watermarked
             ):
                 debug_suffix += ".no_watermark"
+            mono_out_uuid = uuid.uuid4().hex
             mono_out_path = translation_config.get_output_file_path(
-                f"{basename}{debug_suffix}.{translation_config.lang_out}.mono.pdf",
+                f"{basename}{debug_suffix}.{translation_config.lang_out}.{mono_out_uuid}.mono.pdf",
             )
             pdf = pymupdf.open(self.original_pdf_path)
             self.font_mapper.add_font(pdf, self.docs)

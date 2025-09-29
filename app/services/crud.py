@@ -7,6 +7,9 @@ from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import desc
 
+from app.model.translate_record.translate_record import TranslateHistory
+
+
 def get_by_attachment_id(db: Session, attachment_id: UUID) -> AttachmentStorage:
     """
     根据文件的id返回文件的某些信息
@@ -37,3 +40,14 @@ def get_translate_files(
         .all()
     )
     return files, total
+
+def get_by_translate_record_id(db: Session, record_id: UUID) -> TranslateHistory:
+    """
+    根据文件的id返回文件的某些信息
+    """
+    record = (
+        TranslateHistory.query(db)
+        .filter(TranslateHistory.id == record_id)
+        .first()
+    )
+    return record

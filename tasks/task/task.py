@@ -15,7 +15,7 @@ Description：
 import asyncio
 import json
 
-from app.services.crud import get_by_attachment_id
+from app.services.crud import get_by_attachment_id, get_by_translate_record_id
 from pdf2zh_next.high_level import do_translate_file_async
 
 from app.common.engine.pg_session import get_db_session
@@ -25,10 +25,11 @@ from pdf2zh_next.config.model import SettingsModel
 from tasks.utils.util import generate_llm_settings
 
 @app.task(name="translate")
-def translate_file(file_id: str, settings_params: dict):
+def translate_file(file_id: str, record_id: str, settings_params: dict):
     with get_db_session() as session:
         attachment = get_by_attachment_id(session, file_id)
         attachment.status = 4
+        translate_record = get_by_translate_record_id(session, record_id)
         session.commit()
         try:
             try:
@@ -47,12 +48,12 @@ def translate_file(file_id: str, settings_params: dict):
             mono_path = loop.run_until_complete(do_translate_file_async(settings, ignore_error=False))
             # 更新文件状态为翻译成功
             attachment.status = 3
-            extra_info = json.loads(attachment.extra_info)
-            extra_info['mono_path'] = str(mono_path)
-            attachment.extra_info = json.dumps(extra_info, ensure_ascii=False)
+            translate_record.status = 3
+            translate_record.result_path = str(mono_path)
             session.commit()
             return True
         except Exception as e:
+            session.rollback()
             err = str(e)
             logger.info(
                 f"translate file: {err}"
@@ -60,6 +61,8 @@ def translate_file(file_id: str, settings_params: dict):
             logger.exception(e)
             # 更新文件状态为翻译失败
             attachment.status = 6
+            translate_record.status = 6
             attachment.error_message = f"{e}"[:150]
+            translate_record.error_message = f"{e}"[:300]
             session.commit()
             return False
