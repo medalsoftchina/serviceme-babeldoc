@@ -30,6 +30,10 @@ def translate_file(file_id: str, record_id: str, settings_params: dict):
         attachment = get_by_attachment_id(session, file_id)
         attachment.status = 4
         translate_record = get_by_translate_record_id(session, record_id)
+        # 如果状态不是排队中，提前结束
+        if translate_record != 5:
+            return False
+        translate_record.status = 4
         session.commit()
         try:
             try:

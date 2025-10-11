@@ -24,6 +24,9 @@ from app.common.log import register_logger
 from app.model.attachment_storage.attachment_storage import AttachmentStorage
 from datetime import datetime
 
+from app.model.translate_record.translate_record import TranslateHistory
+
+
 class QueueName(Enum):
     # 默认
     DEFAULT = "translate"
@@ -96,13 +99,22 @@ def worker_init(**kwargs):
         with get_db_session() as session:
             files = (
                 AttachmentStorage.query(session)
-                    .filter(AttachmentStorage.status.in_([4, 5]))
+                    .filter(AttachmentStorage.status.in_([4]))
                     .all()
             )
             for file in files:
                 file.error_message = "system restart"
                 file.updated_at = datetime.utcnow()
                 file.status = 6
+            records = (
+                TranslateHistory.query(session)
+                    .filter(TranslateHistory.status.in_([4]))
+                    .all()
+            )
+            for record in records:
+                record.error_message = "system restart"
+                record.updated_at = datetime.utcnow()
+                record.status = 6
             session.commit()
         logger.info("celery worker [Startup Hook] init complete")
     except Exception as e:
