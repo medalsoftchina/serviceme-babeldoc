@@ -1,6 +1,8 @@
 ## 项目简介
 
 本项目基于开源项目 [PDFMathTranslate-next](https://github.com/PDFMathTranslate/PDFMathTranslate-next) 和 [BabelDOC](https://github.com/funstory-ai/BabelDOC) 实现，并以 Celery 形式进行服务部署，旨在为用户提供高效的 PDF 翻译能力。
+- pdf2zh Version: 2.6.4
+- BabelDOC Version: 0.5.9
 
 ## 开源声明
 
