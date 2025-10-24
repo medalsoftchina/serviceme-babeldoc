@@ -1,6 +1,16 @@
-## 项目简介
+## 许可证
 
-本项目基于开源项目 [PDFMathTranslate-next](https://github.com/PDFMathTranslate/PDFMathTranslate-next) 和 [BabelDOC](https://github.com/funstory-ai/BabelDOC) 实现，并以 Celery 形式进行服务部署，旨在为用户提供高效的 PDF 翻译能力。
+本项目基于 [PDFMathTranslate-next](https://github.com/PDFMathTranslate/PDFMathTranslate-next) 和 [BabelDOC](https://github.com/funstory-ai/BabelDOC) 开发，遵循 GNU Affero 通用公共许可证版本 3 (AGPLv3) 发布。
+
+**重要**: 根据 AGPLv3 要求，任何使用、修改或分发本软件的用户都必须：
+1. 保持相同的开源许可
+2. 向所有用户提供完整的源代码
+3. 对于网络服务，需向用户提供获取相应源代码的方法
+
+完整的许可证文本请见 [LICENSE](LICENSE) 文件。
+
+
+## 项目版本
 - pdf2zh Version: 2.6.4
 - BabelDOC Version: 0.5.9
 
