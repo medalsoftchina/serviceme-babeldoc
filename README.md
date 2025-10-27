@@ -29,6 +29,3 @@
 pdf2zh_next\high_level.py的_translate_in_subprocess，将其multiprocessing改为线程内直接调用，适配celery框架
 babeldoc\format\pdf\document_il\backend\pdf_creater.py的subset_fonts_in_subprocess和save_pdf_with_timeout，同理将其multiprocessing改为线程内直接调用，适配celery框架
 celery执行过程中会更新attachment表的文件状态，和celery客户端实现交互（可根据需要移除）
-
-## 开源地址
-项目源码及相关文档将在后续开源平台发布，敬请关注。
