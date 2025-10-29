@@ -25,7 +25,7 @@
 - 支持多种 PDF 文档的翻译处理能力。
 - 易于集成到现有产品或系统中。
 
-##主要改动项
-pdf2zh_next\high_level.py的_translate_in_subprocess，将其multiprocessing改为线程内直接调用，适配celery框架
-babeldoc\format\pdf\document_il\backend\pdf_creater.py的subset_fonts_in_subprocess和save_pdf_with_timeout，同理将其multiprocessing改为线程内直接调用，适配celery框架
-celery执行过程中会更新attachment表的文件状态，和celery客户端实现交互（可根据需要移除）
+## 主要改动项
+- pdf2zh_next\high_level.py的_translate_in_subprocess，将其multiprocessing改为线程内直接调用，适配celery框架
+- babeldoc\format\pdf\document_il\backend\pdf_creater.py的subset_fonts_in_subprocess和save_pdf_with_timeout，同理将其multiprocessing改为线程内直接调用，适配celery框架
+- celery执行过程中会更新attachment表的文件状态，和celery客户端实现交互（可根据需要移除）
